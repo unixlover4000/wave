@@ -1,8 +1,8 @@
-// aviz.c - Terminal audio visualiser (ALSA capture + FFT + ncurses)
+// wave.c - Terminal audio visualiser (ALSA capture + FFT + ncurses)
 // Arch deps: alsa-lib, ncurses
-// Build: gcc -O2 -Wall -Wextra -std=c11 aviz.c -o aviz -lasound -lncurses -lm
-// Run:   ./aviz
-// Device override: ARECORD_DEVICE="hw:1,0" ./aviz
+// Build: gcc -O2 -Wall -Wextra -std=c11 wave.c -o wave -lasound -lncurses -lm
+// Run:   ./wave
+// Device override: ARECORD_DEVICE="hw:1,0" ./wave
 
 #define _POSIX_C_SOURCE 200809L
 #include <alsa/asoundlib.h>
@@ -330,7 +330,7 @@ int main(void){
         erase();
 
         // Header
-        mvprintw(0, 0, "aviz  | device: %s  | SR: %u  | N:%d HOP:%d  | q=quit",
+        mvprintw(0, 0, "wave  | device: %s  | SR: %u  | N:%d HOP:%d  | q=quit",
                  dev, cap.sample_rate, N, HOP);
 
         int vis_top = 1;
