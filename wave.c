@@ -15,6 +15,8 @@
 #include <string.h>
 #include <time.h>
 
+static const float PI_F = 3.14159265358979323846f;
+
 static volatile sig_atomic_t g_stop = 0;
 static void on_sigint(int sig) { (void)sig; g_stop = 1; }
 
@@ -64,7 +66,7 @@ static void fft(cpx *a, int n, int inverse){
     }
 
     for(int len=2; len<=n; len<<=1){
-        float ang = (inverse ? 2.0f : -2.0f) * (float)M_PI / (float)len;
+        float ang = (inverse ? 2.0f : -2.0f) * PI_F / (float)len;
         cpx wlen = (cpx){cosf(ang), sinf(ang)};
         for(int i=0; i<n; i+=len){
             cpx w = (cpx){1.0f, 0.0f};
@@ -110,7 +112,10 @@ static void setup_capture(capture_t *cap, const char *device, unsigned rate, int
     if(err < 0) die_alsa("snd_pcm_open failed", err);
 
     snd_pcm_hw_params_t *hw = NULL;
-    snd_pcm_hw_params_alloca(&hw);
+
+    err = snd_pcm_hw_params_malloc(&hw);
+    if(err < 0) die_alsa("snd_pcm_hw_params_malloc failed", err);
+
     err = snd_pcm_hw_params_any(cap->handle, hw);
     if(err < 0) die_alsa("snd_pcm_hw_params_any failed", err);
 
@@ -137,6 +142,8 @@ static void setup_capture(capture_t *cap, const char *device, unsigned rate, int
     err = snd_pcm_hw_params(cap->handle, hw);
     if(err < 0) die_alsa("snd_pcm_hw_params failed", err);
 
+    snd_pcm_hw_params_free(hw);
+
     err = snd_pcm_prepare(cap->handle);
     if(err < 0) die_alsa("snd_pcm_prepare failed", err);
 }
@@ -146,7 +153,6 @@ static int read_frames_s16(capture_t *cap, int16_t *dst, int frames){
     while(got < frames && !g_stop){
         int r = snd_pcm_readi(cap->handle, dst + got*cap->channels, frames - got);
         if(r == -EPIPE){
-            // overrun
             snd_pcm_prepare(cap->handle);
             continue;
         } else if(r == -EAGAIN){
@@ -170,12 +176,9 @@ static float clampf(float x, float a, float b){
 
 static void make_hann(float *w, int n){
     for(int i=0;i<n;i++){
-        w[i] = 0.5f - 0.5f * cosf(2.0f*(float)M_PI*(float)i/(float)(n-1));
+        w[i] = 0.5f - 0.5f * cosf(2.0f * PI_F * (float)i / (float)(n - 1));
     }
 }
-
-// Log-spaced band mapping helper
-static float lerpf(float a, float b, float t){ return a + (b-a)*t; }
 
 int main(void){
     signal(SIGINT, on_sigint);
@@ -189,9 +192,9 @@ int main(void){
     const unsigned SR = 44100;
     const int CH = 1;
 
-    // FFT settings (power of 2)
-    const int N = 2048;     // FFT size
-    const int HOP = 1024;   // how many new frames per update
+    // FFT settings
+    const int N = 2048;     // FFT size (power of 2)
+    const int HOP = 1024;   // new frames per update
     const float EPS = 1e-9f;
 
     // Setup ALSA capture
@@ -206,7 +209,7 @@ int main(void){
     keypad(stdscr, TRUE);
     curs_set(0);
 
-    // Allocate buffers
+    // Buffers
     int16_t *pcm = (int16_t*)calloc((size_t)HOP * (size_t)CH, sizeof(int16_t));
     float *ring = (float*)calloc((size_t)N, sizeof(float));
     float *win = (float*)malloc((size_t)N * sizeof(float));
@@ -218,16 +221,16 @@ int main(void){
     }
     make_hann(win, N);
 
-    // Smoothed bar values
+    // Smoothed bars
     int last_cols = 0;
-    float *bars = NULL;        // size = cols
-    float *bars_smooth = NULL; // size = cols
+    float *bars = NULL;
+    float *bars_smooth = NULL;
 
-    // Visual tuning
-    const float smooth_attack = 0.55f;  // higher = faster rise
-    const float smooth_release = 0.18f; // higher = faster fall
-    const float floor_db = -70.0f;      // noise floor
-    const float ceil_db  = -5.0f;       // near max
+    // Tuning
+    const float smooth_attack = 0.55f;
+    const float smooth_release = 0.18f;
+    const float floor_db = -70.0f;
+    const float ceil_db  = -5.0f;
 
     double last_frame = now_sec();
 
@@ -235,7 +238,6 @@ int main(void){
         int ch = getch();
         if(ch == 'q' || ch == 'Q') break;
 
-        // Resize handling
         int rows, cols;
         getmaxyx(stdscr, rows, cols);
         if(cols < 10 || rows < 5){
@@ -245,6 +247,7 @@ int main(void){
             sleep_ms(50);
             continue;
         }
+
         if(cols != last_cols){
             free(bars);
             free(bars_smooth);
@@ -253,19 +256,18 @@ int main(void){
             last_cols = cols;
         }
 
-        // Read HOP frames
+        // Read audio
         int got = read_frames_s16(&cap, pcm, HOP);
         if(got <= 0) break;
 
-        // Shift ring buffer left by HOP, append new samples
+        // Shift ring, append
         memmove(ring, ring + HOP, (size_t)(N - HOP) * sizeof(float));
         for(int i=0;i<HOP;i++){
-            // mono S16 -> float [-1,1]
             float x = (float)pcm[i*CH] / 32768.0f;
             ring[N - HOP + i] = x;
         }
 
-        // Window + copy to complex buffer
+        // Window -> complex buffer
         for(int i=0;i<N;i++){
             float xw = ring[i] * win[i];
             spec[i].re = xw;
@@ -275,24 +277,18 @@ int main(void){
         // FFT
         fft(spec, N, 0);
 
-        // Compute magnitudes for bins 1..N/2-1
-        // We will map these to screen columns using log-frequency bands.
+        // Map bins to columns using log bands
         int usable_bins = N/2;
         float nyquist = (float)cap.sample_rate * 0.5f;
-
-        // Frequency range to show (skip sub-bass rumble)
         float fmin = 40.0f;
         float fmax = nyquist * 0.95f;
 
-        // Clear bars
         for(int x=0;x<cols;x++) bars[x] = 0.0f;
 
         for(int x=0; x<cols; x++){
-            // Log-spaced bands
             float t0 = (float)x / (float)cols;
-            float t1 = (float)(x+1) / (float)cols;
+            float t1 = (float)(x + 1) / (float)cols;
 
-            // Log mapping: f = fmin * (fmax/fmin)^t
             float f0 = fmin * powf(fmax / fmin, t0);
             float f1 = fmin * powf(fmax / fmin, t1);
 
@@ -300,11 +296,10 @@ int main(void){
             int b1 = (int)ceilf (f1 * (float)N / (float)cap.sample_rate);
 
             if(b0 < 1) b0 = 1;
-            if(b1 > usable_bins-1) b1 = usable_bins-1;
+            if(b1 > usable_bins - 1) b1 = usable_bins - 1;
             if(b1 <= b0) b1 = b0 + 1;
-            if(b1 > usable_bins-1) b1 = usable_bins-1;
+            if(b1 > usable_bins - 1) b1 = usable_bins - 1;
 
-            // Average power in band
             float acc = 0.0f;
             int count = 0;
             for(int k=b0; k<=b1; k++){
@@ -316,20 +311,15 @@ int main(void){
             }
             float p = (count > 0) ? (acc / (float)count) : 0.0f;
 
-            // Convert to dB-ish scale (relative)
             float db = 10.0f * log10f(p + EPS);
-
-            // Normalize to 0..1 in [floor_db, ceil_db]
             float norm = (db - floor_db) / (ceil_db - floor_db);
             norm = clampf(norm, 0.0f, 1.0f);
 
             bars[x] = norm;
         }
 
-        // Smooth bars and draw
+        // Draw
         erase();
-
-        // Header
         mvprintw(0, 0, "wave  | device: %s  | SR: %u  | N:%d HOP:%d  | q=quit",
                  dev, cap.sample_rate, N, HOP);
 
@@ -338,8 +328,6 @@ int main(void){
 
         for(int x=0; x<cols; x++){
             float v = bars[x];
-
-            // simple smoothing (different attack/release)
             float prev = bars_smooth[x];
             float a = (v > prev) ? smooth_attack : smooth_release;
             float sm = prev + a * (v - prev);
@@ -349,7 +337,6 @@ int main(void){
             if(h < 0) h = 0;
             if(h > vis_h - 1) h = vis_h - 1;
 
-            // draw from bottom up
             for(int yy=0; yy<h; yy++){
                 int y = rows - 1 - yy;
                 mvaddch(y, x, '|');
@@ -358,11 +345,11 @@ int main(void){
 
         refresh();
 
-        // Aim for ~30 FPS (but capture pacing also matters)
         double t = now_sec();
         double dt = t - last_frame;
         last_frame = t;
         (void)dt;
+
         sleep_ms(10);
     }
 
